@@ -3,115 +3,89 @@ import requests
 import json
 import openai
 import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+from email.message import EmailMessage
 import os
-from dotenv import load_dotenv
 
-# 載入 .env 檔案
-load_dotenv()
+app = Flask(__name__)
 
-# 讀取環境變數
+# 機密變數從環境讀取
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GMAIL_USER = os.getenv("GMAIL_USER")
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
-NOTIFY_EMAIL = os.getenv("NOTIFY_EMAIL")
 
 openai.api_key = OPENAI_API_KEY
 
-app = Flask(__name__)
-
 @app.route("/", methods=["GET"])
 def home():
-    return "Skyona Bot is running!", 200
+    return "Skyona Bot + GPT + Gmail is running!", 200
 
-@app.route("/webhook", methods=["GET", "POST"])
+@app.route("/webhook", methods=["POST", "GET"])
 def webhook():
     if request.method == "GET":
-        return "Webhook is active.", 200
+        return "Webhook is active", 200
 
-    if request.method == "POST":
-        print("✅ 收到 LINE 傳來的 Webhook")
-        body = request.get_json()
-        print(json.dumps(body, indent=2))
+    body = request.get_json()
+    print("✅ 收到 Webhook:", json.dumps(body, indent=2))
 
-        for event in body.get("events", []):
-            if event["type"] == "message":
-                msg_type = event["message"]["type"]
-                reply_token = event["replyToken"]
+    for event in body.get("events", []):
+        if event["type"] == "message":
+            msg_type = event["message"]["type"]
+            reply_token = event["replyToken"]
 
-                if msg_type == "text":
-                    user_message = event["message"]["text"]
-                    gpt_reply = ask_gpt(user_message)
-                    reply(reply_token, gpt_reply)
+            if msg_type == "text":
+                user_msg = event["message"]["text"]
+                ai_reply = chatgpt(user_msg)
+                reply(reply_token, ai_reply)
 
-                    if should_notify(user_message):
-                        send_email_notification(user_message, gpt_reply)
+                if need_notify(user_msg):
+                    send_email("客服通知", f"收到客戶問題：{user_msg}\nAI 回覆：{ai_reply}")
 
-                elif msg_type == "image":
-                    reply(reply_token, "收到圖片囉 📷！")
+            elif msg_type == "image":
+                reply(reply_token, "收到圖片囉！")
 
-        return "OK", 200
+    return "OK", 200
 
 def reply(reply_token, text):
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
     }
-
     body = {
         "replyToken": reply_token,
-        "messages": [{
-            "type": "text",
-            "text": text
-        }]
+        "messages": [{"type": "text", "text": text}]
     }
-
-    response = requests.post(
-        "https://api.line.me/v2/bot/message/reply",
-        headers=headers,
-        data=json.dumps(body)
-    )
-
+    response = requests.post("https://api.line.me/v2/bot/message/reply", headers=headers, data=json.dumps(body))
     print("✅ 回應結果：", response.status_code, response.text)
 
-def ask_gpt(prompt):
+def chatgpt(text):
     try:
-        completion = openai.ChatCompletion.create(
+        response = openai.ChatCompletion.create(
             model="gpt-4",
-            messages=[
-                {"role": "system", "content": "你是一個友善且懂機械維修的客服助理"},
-                {"role": "user", "content": prompt}
-            ]
+            messages=[{"role": "user", "content": text}]
         )
-        return completion.choices[0].message["content"]
+        return response.choices[0].message["content"].strip()
     except Exception as e:
-        return f"抱歉，AI 回覆發生錯誤：{str(e)}"
+        return f"AI 回覆失敗：{e}"
 
-def should_notify(message):
-    keywords = ["報修", "壞掉", "沒反應", "故障", "聯絡客服"]
-    return any(kw in message for kw in keywords)
+def need_notify(text):
+    keywords = ["壞掉", "異常", "故障", "客服", "問題", "報修"]
+    return any(kw in text for kw in keywords)
 
-def send_email_notification(user_message, gpt_reply):
-    msg = MIMEMultipart()
+def send_email(subject, content):
+    msg = EmailMessage()
+    msg["Subject"] = subject
     msg["From"] = GMAIL_USER
-    msg["To"] = NOTIFY_EMAIL
-    msg["Subject"] = "【AI客服通知】使用者可能需要協助"
-
-    body = f"使用者訊息：{user_message}
-
-AI 回覆內容：{gpt_reply}"
-    msg.attach(MIMEText(body, "plain"))
+    msg["To"] = GMAIL_USER
+    msg.set_content(content)
 
     try:
-        server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
-        server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-        server.send_message(msg)
-        server.quit()
-        print("✅ 已寄送客服通知 email")
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+            smtp.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+            smtp.send_message(msg)
+            print("✅ 已寄出通知 email")
     except Exception as e:
-        print(f"❌ email 發送失敗：{str(e)}")
+        print("❌ email 寄送失敗：", e)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
